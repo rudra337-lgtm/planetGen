@@ -22,10 +22,44 @@ process that started the run still does it, between the queued stages, until PER
 PERF.128 give it units.
 """
 
+import contextlib
 import json
 import time
 
 from planetgen.queue import commands, redisqueue, runrecord, units, workers
+
+
+WAIT_FOR_TURN_POLL_SECONDS = 2.0
+"""float: How often a run that waits for its turn (`waiting_for_turn`) looks at the slot again."""
+
+_turn = {"seconds": 0.0}
+
+
+@contextlib.contextmanager
+def waiting_for_turn(seconds):
+    """
+    Inside this block a run that finds another run of its kind going waits up to `seconds` for it to end instead of
+    raising `runrecord.Busy`: how an API job (PERF.119, `queue/api_jobs.py`) takes its turn, as a queued job should. The
+    command line leaves it off, so `planetgen galaxy` still refuses at once while another run is going.
+    """
+    before = _turn["seconds"]
+    _turn["seconds"] = seconds
+    try:
+        yield
+    finally:
+        _turn["seconds"] = before
+
+
+def _start_run(conn, *args, **kwargs):
+    """`runrecord.start_run`, waiting for the run that holds the slot while `waiting_for_turn` allows."""
+    deadline = time.monotonic() + _turn["seconds"]
+    while True:
+        try:
+            return runrecord.start_run(conn, *args, **kwargs)
+        except runrecord.Busy:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(WAIT_FOR_TURN_POLL_SECONDS)
 
 
 def database_args(mysql_config):
@@ -219,7 +253,7 @@ def run(title, steps, on_plan, on_result, on_progress=None, workers_count=None, 
                                      f"start Redis to run this: {exc}") from exc
     by_key = {step.key: step for step in steps}
     recorded = [by_key.get(step.key, step) for step in (listing or steps)]
-    run_id = runrecord.start_run(
+    run_id = _start_run(
         conn, title, [runrecord.Stage(step.key, step.label, workers=workers_count or 1,
                                       expected_seconds=expected_seconds(step, (rows or {}).get(step.key)),
                                       row=(rows or {}).get(step.key)) for step in steps],
