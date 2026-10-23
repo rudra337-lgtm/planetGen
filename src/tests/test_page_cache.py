@@ -184,6 +184,20 @@ def test_clear_beats_a_fetch_in_flight(db):
     assert cache.get(db, "/t") is None
 
 
+def test_the_databaseless_cache_is_bounded_too():
+    """PERF.111: answers put without a database (`db is None`) count against
+    `max_entries` like the rest -- `put` trims them too, or the cache grows
+    past the limit and the thread test's last such put breaks its bound."""
+    clock = _Clock()
+    cache, _ = _cache({None: "a"}, clock, max_entries=3, stamp_seconds=1e9)
+    for n in range(6):
+        target = f"/sectors/{n}"
+        assert cache.get(None, target) is None
+        cache.put(None, target, f"b{n}", cache.begin(None))
+        clock.now += 0.001
+    assert len(cache) <= 3
+
+
 def test_least_recently_used_goes_first_and_size_is_bounded(db):
     clock = _Clock()
     cache, _ = _cache({db: "a"}, clock, max_entries=2, stamp_seconds=1e9)
